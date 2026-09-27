@@ -2,21 +2,17 @@
 # .gitattributes — MDT-OEM-Extensibility
 # ═══════════════════════════════════════════════════════════════════════════
 #
-# This file tells Git how to handle line endings, encoding hints, and merge
-# strategy per file type. It exists because this repository mixes several
-# content types — Windows text files, POSIX text files, binary assets, and
-# configuration files with specific encoding requirements — and a single
-# global rule would be wrong for at least one of them.
-#
-# The rules below are grouped by concern:
+# This repository ships build tooling, per-vendor recipes, and small
+# customization assets. It does NOT ship vendor installers, downloaded
+# caches, or built .7z archives. The rules below group by concern:
 #
 #   1. Default behavior
-#   2. Windows text files (PowerShell, CMD, XML, and so on)
+#   2. Windows text files (CRLF)
 #   3. Registry files (UTF-16 LE, CRLF)
-#   4. Cross-platform text files (Markdown, JSON, YAML, and so on)
-#   5. Binary files (images, archives, installers)
-#   6. Language and format hints
-#   7. Export-ignore rules for release archives
+#   4. Cross-platform text files (LF)
+#   5. Binary files (defensive — no vendor binaries should be committed)
+#   6. Linguist classification
+#   7. Export-ignore rules
 #
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -24,10 +20,6 @@
 # ───────────────────────────────────────────────────────────────────────────
 # 1. DEFAULT BEHAVIOR
 # ───────────────────────────────────────────────────────────────────────────
-# When a file's type is not explicitly handled below, let Git normalize
-# line endings to LF in the repository and check them out with the platform
-# default (CRLF on Windows, LF on Linux and macOS). This is the modern Git
-# default and the safest baseline.
 
 * text=auto
 
@@ -35,35 +27,25 @@
 # ───────────────────────────────────────────────────────────────────────────
 # 2. WINDOWS TEXT FILES
 # ───────────────────────────────────────────────────────────────────────────
-# Files that are consumed by Windows tools which expect CRLF line endings
-# and UTF-8 (or UTF-16) encoding without BOM.
+# Files consumed by Windows tools that expect CRLF line endings.
 
-# PowerShell — CRLF for Windows PowerShell 5.1 compatibility
 *.ps1       text eol=crlf
 *.psm1      text eol=crlf
 *.psd1      text eol=crlf
 *.ps1xml    text eol=crlf
-
-# Batch and command scripts — CRLF
 *.cmd       text eol=crlf
 *.bat       text eol=crlf
-
-# Windows Unattend and DISM XML — CRLF
 *.xml       text eol=crlf
-
-# Windows INI files — CRLF
+*.inf       text eol=crlf
 *.ini       text eol=crlf
-
-# Winget manifests and Microsoft-authored YAML — CRLF
-*.winget    text eol=crlf
+*.txt       text eol=crlf
 
 
 # ───────────────────────────────────────────────────────────────────────────
 # 3. REGISTRY FILES
 # ───────────────────────────────────────────────────────────────────────────
-# .reg files must be UTF-16 LE with a BOM and CRLF line endings. Git cannot
-# enforce encoding, but it can enforce line endings. The encoding rule is
-# documented in CONTRIBUTING.md and must be applied by the contributor.
+# .reg files must be UTF-16 LE with a BOM and CRLF. The working-tree-encoding
+# attribute enforces the encoding on checkout.
 
 *.reg       text eol=crlf working-tree-encoding=UTF-16LE-BOM
 
@@ -71,133 +53,125 @@
 # ───────────────────────────────────────────────────────────────────────────
 # 4. CROSS-PLATFORM TEXT FILES
 # ───────────────────────────────────────────────────────────────────────────
-# Files that are read by tools and services on any platform. These should
-# use LF in the repository and on disk, regardless of the checkout platform,
-# so that diffs and hashes are stable across environments.
+# Files read by tools and editors on any platform. LF in the repository.
 
-# Markdown
 *.md        text eol=lf
-
-# JSON — recipes, schemas, map files
 *.json      text eol=lf
-
-# YAML — GitHub configuration, workflows
 *.yml       text eol=lf
 *.yaml      text eol=lf
-
-# Plain text — notes, configs, license files
-*.txt       text eol=lf
-
-# Git configuration files
+*.sh        text eol=lf
 .gitattributes  text eol=lf
 .gitignore      text eol=lf
-.gitconfig      text eol=lf
-
-# Environment files and shell scripts
-*.sh        text eol=lf
-*.env       text eol=lf
+.gitmodules     text eol=lf
 
 
 # ───────────────────────────────────────────────────────────────────────────
 # 5. BINARY FILES
 # ───────────────────────────────────────────────────────────────────────────
-# Files that must never be normalized, diffed as text, or merged as text.
-# Marking them binary tells Git to leave the bytes alone.
-
-# Images
-*.jpg       binary
-*.jpeg      binary
-*.png       binary
-*.gif       binary
-*.bmp       binary
-*.ico       binary
-*.tif       binary
-*.tiff      binary
-*.webp      binary
-*.svg       text eol=lf
-
-# Archives
-*.zip       binary
-*.7z        binary
-*.7z.001    binary
-*.7z.002    binary
-*.7z.003    binary
-*.7z.004    binary
-*.7z.005    binary
-*.7z.006    binary
-*.7z.007    binary
-*.7z.008    binary
-*.7z.009    binary
-*.7z.010    binary
-*.rar       binary
-*.tar       binary
-*.gz        binary
-*.tgz       binary
-*.bz2       binary
-*.xz        binary
+# This repository should not contain vendor binaries. The rules below are
+# defensive: if a contributor accidentally commits one, Git will not mangle
+# it, and the reviewer will immediately notice the mistake.
 
 # Executables and installers
-*.exe       binary
-*.msi       binary
-*.msp       binary
-*.msu       binary
-*.msix      binary
+*.exe        binary
+*.com        binary
+*.scr        binary
+*.msi        binary
+*.msp        binary
+*.msu        binary
+*.cab        binary
+*.psf        binary
+*.msix       binary
 *.msixbundle binary
-*.appx      binary
+*.msixupload binary
+*.appx       binary
 *.appxbundle binary
-*.dll       binary
-*.sys       binary
-*.com       binary
-*.scr       binary
+*.appxupload binary
 
-# Driver and firmware files
-*.inf       text eol=crlf
-*.cat       binary
-*.bin       binary
-*.rom       binary
-*.efi       binary
-*.cap       binary
-*.fd        binary
+# Libraries and drivers
+*.dll        binary
+*.ocx        binary
+*.cpl        binary
+*.sys        binary
+*.cat        binary
+*.bin        binary
+*.dat        binary
+*.rom        binary
+*.efi        binary
+
+# Archives
+*.zip        binary
+*.rar        binary
+*.7z         binary
+*.7z.001     binary
+*.7z.002     binary
+*.7z.003     binary
+*.7z.004     binary
+*.7z.005     binary
+*.7z.006     binary
+*.7z.007     binary
+*.7z.008     binary
+*.7z.009     binary
+*.7z.010     binary
+*.tar        binary
+*.tar.gz     binary
+*.tgz        binary
+*.gz         binary
+*.bz2        binary
+*.xz         binary
 
 # Disk and OS images
-*.iso       binary
-*.wim       binary
-*.esd       binary
-*.swm       binary
-*.vhd       binary
-*.vhdx      binary
-*.vmdk      binary
-*.vdi       binary
-*.ffu       binary
+*.iso        binary
+*.wim        binary
+*.esd        binary
+*.swm        binary
+*.vhd        binary
+*.vhdx       binary
+*.vmdk       binary
+*.vdi        binary
+*.ffu        binary
 
-# Fonts and other binaries
-*.ttf       binary
-*.otf       binary
-*.woff      binary
-*.woff2     binary
+# Image assets — committed only as small customization assets
+*.jpg        binary
+*.jpeg       binary
+*.png        binary
+*.gif        binary
+*.bmp        binary
+*.ico        binary
+*.tif        binary
+*.tiff       binary
+*.webp       binary
+*.theme      text eol=crlf
+*.themepack  binary
+*.svg        text eol=lf
 
-# Certificate and key files (should never be committed, but if they slip in)
-*.pfx       binary
-*.p12       binary
-*.key       binary
-*.pem       text eol=lf
+# Fonts
+*.ttf        binary
+*.otf        binary
+*.woff       binary
+*.woff2      binary
+
+# Cryptographic material (should never be committed, but classify correctly)
+*.pfx        binary
+*.p12        binary
+*.key        binary
+*.pem        text eol=lf
 
 
 # ───────────────────────────────────────────────────────────────────────────
-# 6. LANGUAGE AND FORMAT HINTS
+# 6. LINGUIST CLASSIFICATION
 # ───────────────────────────────────────────────────────────────────────────
-# Tell GitHub Linguist how to classify files for repository statistics.
-# This does not affect Git behavior — only how the language bar renders.
+# Tell GitHub Linguist how to count these files in repository stats.
 
-# Vendored or generated content that should not count toward language stats
-vendors/**/Assets/**/*.js    linguist-vendored
-vendors/**/Assets/**/*.css   linguist-vendored
+# Documentation is not code
+docs/**       linguist-documentation
+.github/**    linguist-documentation
+README.md     linguist-documentation
+CHANGELOG.md  linguist-documentation
+CONTRIBUTING.md  linguist-documentation
+CODE_OF_CONDUCT.md  linguist-documentation
 
-# Documentation and configuration do not count as code
-docs/**      linguist-documentation
-.github/**   linguist-documentation
-
-# Recipes are data, not code
+# Recipes are configuration data, not code
 vendors/**/Recipe.json  linguist-documentation
 
 # Schemas are configuration
@@ -207,13 +181,12 @@ schema/**   linguist-documentation
 # ───────────────────────────────────────────────────────────────────────────
 # 7. EXPORT-IGNORE RULES
 # ───────────────────────────────────────────────────────────────────────────
-# Files that should be excluded from `git archive` and GitHub's automatic
-# release tarballs. These are developer-only files that users do not need.
+# Developer-only files that do not belong in `git archive` output or
+# GitHub's auto-generated source tarballs.
 
 .github/          export-ignore
 .gitattributes    export-ignore
 .gitignore        export-ignore
-.editorconfig     export-ignore
 tests/            export-ignore
 CONTRIBUTING.md   export-ignore
 CODE_OF_CONDUCT.md export-ignore
