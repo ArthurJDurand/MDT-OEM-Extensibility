@@ -1,348 +1,97 @@
-# `winget download` Reference
+# Recipe Schema Reference
 
-This document explains how the build tool uses `winget download` to fetch vendor installers, when it works, when it does not, and how to verify a package before adding it to a recipe.
+Complete field reference for the vendor `Recipe.json` files that drive the build tools in this repository. Every vendor under `vendors/<Vendor>/` has a `Recipe.json` that declares what to fetch, from where, and how to pack it.
 
-`winget download` is the fastest and most reliable way to fetch Microsoft-signed or vendor-signed installers for MSI and EXE packages. For MSIX and UWP packages from the Microsoft Store, it requires a work or school account and does not work in unattended builds. Those cases fall back to `direct-url` or `manual` sources.
+The schema is defined in [`schema/vendor-recipe.schema.json`](../schema/vendor-recipe.schema.json). This document is the human-readable companion to that schema.
 
 ---
 
 ## Table of Contents
 
-- [What `winget download` Does](#what-winget-download-does)
-- [When It Works](#when-it-works)
-- [When It Does Not Work](#when-it-does-not-work)
-- [Basic Usage](#basic-usage)
-- [Finding the Winget ID for an App](#finding-the-winget-id-for-an-app)
-- [Verifying a Package Before Adding It to a Recipe](#verifying-a-package-before-adding-it-to-a-recipe)
-- [Deterministic Output Names](#deterministic-output-names)
-- [Common Flags](#common-flags)
-- [Common Failure Modes](#common-failure-modes)
-- [Fallback Strategies](#fallback-strategies)
-- [Recipe Source Type: `winget`](#recipe-source-type-winget)
-- [Automation Notes](#automation-notes)
-- [Related Documentation](#related-documentation)
+- [Overview](#overview)
+- [Design Principles](#design-principles)
+- [Top-Level Structure](#top-level-structure)
+- [The `fetch` Array](#the-fetch-array)
+  - [Common Fields](#common-fields)
+  - [`winget` Source](#winget-source)
+  - [`direct-url` Source](#direct-url-source)
+  - [`repo-asset` Source](#repo-asset-source)
+  - [`manual` Source](#manual-source)
+- [The `assets` Array](#the-assets-array)
+- [Bundling Nested Archives](#bundling-nested-archives)
+- [Framework Manifest Alignment](#framework-manifest-alignment)
+- [Recipe Versioning](#recipe-versioning)
+- [Validation Rules](#validation-rules)
+- [Complete Example](#complete-example)
+- [Field Reference Tables](#field-reference-tables)
 
 ---
 
-## What `winget download` Does
+## Overview
 
-`winget download` resolves a package's manifest, downloads the installer from the source URL recorded in that manifest, verifies the installer's SHA-256 hash against the manifest's expected hash, and writes the file to a local folder.
+A recipe is a JSON document with two responsibilities:
 
-It does **not** install anything. It is purely a fetch operation.
+1. **Tell the build tool what to fetch.** For every app the deployment framework expects, the recipe says where that app comes from — `winget`, a direct vendor URL, a committed repository asset, or manual supply.
+2. **Tell the build tool what to pack.** Committed customization assets (wallpapers, registry files, `Customizations.ps1`, and so on) are declared in the recipe with their target paths inside the archive.
 
-Contrast with `winget install`, which resolves the same manifest, downloads the installer, verifies the hash, and then runs the installer silently on the current machine.
-
-For this project, we want `winget download` — the installer is later repacked into a vendor `.7z` archive and shipped to a target machine, where the framework (or `pre.ps1`) runs it during OOBE.
-
----
-
-## When It Works
-
-`winget download` works when all of the following are true:
-
-1. The package is published in the `winget` source (the community-maintained manifest repository).
-2. The manifest declares an `InstallerType` of `msi`, `exe`, `inno`, `nullsoft`, `wix`, `burn`, or any other non-Store type.
-3. The installer's `InstallerUrl` in the manifest is a stable, publicly accessible HTTPS URL.
-4. The manifest provides a `InstallerSha256` value that matches the file at that URL.
-
-If all four are true, `winget download` succeeds without authentication and without a Microsoft account.
-
-**Common examples that work:**
-
-```
-Microsoft.Edge
-Google.Chrome
-7zip.7zip
-RARLab.WinRAR
-Notepad++.Notepad++
-Dell.CommandUpdate.Universal
-Dell.Optimizer
-Dell.SupportAssist
-HP.SupportAssistant
-HP.ImageAssistant
-Lenovo.SystemUpdate
-Lenovo.Vantage
-```
-
-The last four are examples of vendor-published MSI or EXE packages that appear in the `winget` source. They are what makes this workflow possible for OEM apps.
+The recipe does **not** describe install behaviour. That belongs to the framework manifest in the deployment repository. See [Framework Manifest Alignment](#framework-manifest-alignment) below.
 
 ---
 
-## When It Does Not Work
+## Design Principles
 
-`winget download` fails or requires authentication when **any** of the following is true:
+Three principles shape the schema:
 
-1. The package is published only in the `msstore` source (the Microsoft Store).
-2. The package is an MSIX, APPX, or bundle (`.msix`, `.appxbundle`, `.msixbundle`).
-3. The package requires a Microsoft work or school account to download.
+1. **Single source of truth for install behaviour.** The deployment repository's `Manifests/<Vendor>.json` declares how each app is installed — `AppName`, `InstallerPath`, `InstallerArgs`, eligibility, pinning. The recipe does **not** duplicate any of that. It adds only the build-time information the framework manifest cannot know: where to fetch each app from, and which committed assets to bundle.
 
-The most common case in practice is OEM UWP apps and Store-only utilities. Examples:
+2. **Explicit is better than inferred.** Every app declares exactly one source type. No `auto`. No guessing. The build tool fails loudly when it cannot resolve a source.
 
-```
-DellInc.DellSupportAssistforPCs       (MSIX, msstore-only)
-DellInc.DellCommandUpdate             (AppX, msstore-only)
-DellInc.MyAlienware                   (msstore-only)
-9PMHP03NJ9QP                          (msstore-only, Alienware Command Center supplemental)
-Microsoft.WindowsAppRuntime.1.8       (sometimes works, sometimes not, depending on version)
-```
-
-For these apps, the recipe must use `direct-url` or `manual` as the source type.
-
-> **What about a work or school account?**
-> It is technically possible to authenticate to the Microsoft Store with a work or school account and download Store-only packages. But the authentication flow is interactive, tokens expire, and unattended builds break the moment a token expires. For a build system that is meant to be reproducible, this is the wrong trade-off. We treat Store-only packages as `manual` and document where the user can obtain them.
+3. **Small surface, extensible.** The schema is intentionally minimal. New source types and new optional fields can be added without breaking existing recipes.
 
 ---
 
-## Basic Usage
+## Top-Level Structure
 
-```powershell
-winget download --id Microsoft.Edge --download-directory C:\Cache
+```json
+{
+  "recipeVersion": "1.0",
+  "name": "Dell",
+  "frameworkManifest": "Dell.json",
+  "architecture": "x64",
+  "fetch": [ /* app entries */ ],
+  "assets": [ /* asset entries */ ]
+}
 ```
 
-Output:
-
-```
-Found Microsoft Edge [Microsoft.Edge] Version 154.0.4258.37
-This application is licensed to you by its owner.
-Microsoft is not responsible for, nor does it grant any licenses to, third-party packages.
-Downloading https://download.microsoft.com/download/f0d34257-.../MicrosoftEdgeEnterpriseX64.msi
-  ██████████████████████████████   159 MB /  159 MB
-Successfully verified installer hash
-Installer downloaded: C:\Cache\Microsoft Edge_154.0.4258.37_Machine_X64_wix_en-US.msi
-```
-
-The tool does not print a JSON output, so the build tool wraps it and inspects the file system afterward.
-
-### Minimal unattended invocation
-
-For scripts, always pass both acceptance flags. Without them, `winget` will prompt and hang:
-
-```powershell
-winget download `
-    --id $WingetId `
-    --download-directory $StagingDir `
-    --accept-source-agreements `
-    --accept-package-agreements `
-    --disable-interactivity
-```
-
-- `--accept-source-agreements` — accepts the `winget` source terms.
-- `--accept-package-agreements` — accepts the package's license terms.
-- `--disable-interactivity` — fails fast instead of prompting.
-
----
-
-## Finding the Winget ID for an App
-
-Three methods, in order of speed:
-
-### 1. Search from the command line
-
-```powershell
-winget search "Dell Command Update"
-```
-
-Output:
-
-```
-Name                                    Id                              Version   Source
---------------------------------------------------------------------------------------
-Dell Command | Update                   Dell.CommandUpdate              5.5.0     winget
-Dell Command | Update (Universal)       Dell.CommandUpdate.Universal    5.5.0     winget
-```
-
-The `Id` column is what goes in the recipe's `WingetId` field.
-
-### 2. Search on `winget.run`
-
-[winget.run](https://winget.run/) indexes the same manifests and provides a searchable web interface. Useful when you are not on a Windows machine.
-
-### 3. Search the manifest repository directly
-
-The manifests live at [github.com/microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs). You can browse or grep them. Each manifest is a YAML file with an `Id` field.
-
----
-
-## Verifying a Package Before Adding It to a Recipe
-
-Before you add a `winget` source to a recipe, verify three things:
-
-### 1. The package downloads
-
-```powershell
-$tmp = "$env:TEMP\winget-test"
-New-Item -ItemType Directory -Path $tmp -Force | Out-Null
-
-winget download `
-    --id <WingetId> `
-    --download-directory $tmp `
-    --accept-source-agreements `
-    --accept-package-agreements `
-    --disable-interactivity
-
-if ($LASTEXITCODE -ne 0) { "FAILED with exit code $LASTEXITCODE" }
-```
-
-If this succeeds, the package is fetchable.
-
-### 2. The output is what you expected
-
-```powershell
-Get-ChildItem $tmp
-```
-
-You should see one file with an extension that matches the app's installer type (`.msi`, `.exe`, and so on). If you see a `.msix` or `.appxbundle`, the app is a Store-only package and `winget download` succeeded only because it is published in both sources — this will fail in a clean environment. Mark the recipe entry as `manual` instead.
-
-### 3. The output name is deterministic
-
-Run the download twice with a clean cache and compare the filenames:
-
-```powershell
-Remove-Item $tmp -Recurse -Force
-New-Item -ItemType Directory -Path $tmp -Force | Out-Null
-winget download --id <WingetId> --download-directory $tmp --accept-source-agreements --accept-package-agreements --disable-interactivity
-Get-ChildItem $tmp | Select-Object Name
-```
-
-If the name changes between runs (it usually includes the version number), the build tool must glob the output rather than assume a fixed filename. The `Resolve-WingetPackage.ps1` wrapper handles this — it lists the folder after download and picks the single new file.
-
----
-
-## Deterministic Output Names
-
-`winget download` produces filenames in this pattern:
-
-```
-<ProductName>_<Version>_<Scope>_<Architecture>_<InstallerType>_<Locale>.<extension>
-```
-
-Examples:
-
-```
-Microsoft Edge_154.0.4258.37_Machine_X64_wix_en-US.msi
-Google Chrome_154.0.8037.58_Machine_X64_wix_en-US.msi
-Dell Command Update_5.5.0_Machine_X64_wix_en-US.exe
-```
-
-The name is deterministic for a given version but changes when the version changes. The build tool must not depend on a fixed name.
-
-Instead, the wrapper script:
-
-1. Records the directory contents before the download.
-2. Runs `winget download`.
-3. Records the directory contents after.
-4. Picks the single new file.
-5. Verifies its extension matches the expected type.
-6. Moves it into the staging folder with the correct filename for the recipe.
-
-The recipe does not need to know the winget-generated filename — it just needs to know the winget ID and the target path inside the archive.
-
----
-
-## Common Flags
-
-| Flag | Purpose | Required for this project? |
-|---|---|---|
-| `--id <id>` | The winget package ID. | Yes |
-| `--download-directory <path>` | Where to write the installer. | Yes |
-| `--accept-source-agreements` | Accept the winget source terms. | Yes — otherwise prompts |
-| `--accept-package-agreements` | Accept the package license terms. | Yes — otherwise prompts |
-| `--disable-interactivity` | Fail instead of prompting. | Yes — for unattended builds |
-| `--version <version>` | Pin a specific package version. | No — recipe pins versions via the manifest, not the winget flag |
-| `--architecture <arch>` | Force x64, x86, or arm64. | Sometimes — for multi-arch packages where x64 must be explicit |
-| `--locale <locale>` | Force a specific locale. | Sometimes — for packages with locale-specific installers |
-
-For the build tool, the standard invocation is:
-
-```powershell
-winget download `
-    --id $WingetId `
-    --download-directory $StagingDir `
-    --accept-source-agreements `
-    --accept-package-agreements `
-    --disable-interactivity
-```
-
-Optional `--architecture` and `--locale` are passed when the recipe specifies them.
-
----
-
-## Common Failure Modes
-
-| Exit Code | Meaning | Cause | Fix |
+| Field | Type | Required | Notes |
 |---|---|---|---|
-| `0` | Success | — | — |
-| `0x8A15002B` | No matching package found | ID is wrong or package was removed from the source | Re-search and update the recipe |
-| `0x8A150014` | Installer hash mismatch | The vendor replaced the file at the URL without updating the manifest | Wait 24 hours and retry; if it persists, open an issue with the winget-pkgs repo |
-| `0x8A15005E` | Package requires admin approval | Rare, usually for packages that install drivers | Use `direct-url` from the vendor instead |
-| `0x8A15002E` | Download failed | Network issue, CDN rate limit, or the URL is dead | Retry; if persistent, check the vendor's status page |
-| `0x8A150033` | Source requires authentication | MSStore-only package or work/school account requirement | Mark as `manual` in the recipe |
-| `0x8A150013` | Package agreements not accepted | Missing `--accept-package-agreements` | Add the flag |
-| `0x8A150010` | Source agreements not accepted | Missing `--accept-source-agreements` | Add the flag |
-
-For a full list, run:
-
-```powershell
-winget download --help
-```
-
-Or see the [winget error codes documentation](https://learn.microsoft.com/en-us/windows/package-manager/winget/returnCodes).
+| `recipeVersion` | string | yes | Schema version the recipe targets. See [Recipe Versioning](#recipe-versioning). |
+| `name` | string | yes | Vendor token. Must match the folder name and the `name` field in the framework manifest. |
+| `frameworkManifest` | string | yes | Filename of the framework manifest this recipe pairs with. Usually `<name>.json`. |
+| `architecture` | string | yes | `"x64"` or `"x86"`. Selects which framework manifest the tool validates against. |
+| `fetch` | array | yes | One entry per app. See [The `fetch` Array](#the-fetch-array). |
+| `assets` | array | no | Committed customization assets. See [The `assets` Array](#the-assets-array). |
 
 ---
 
-## Fallback Strategies
+## The `fetch` Array
 
-When `winget download` does not work for an app, the recipe must fall back to one of the other source types.
+Every entry in `fetch` corresponds to exactly one `AppName` in the framework manifest. The build tool validates this and fails if the two are out of sync.
 
-### `direct-url`
+### Common Fields
 
-Used when the vendor publishes the installer at a stable, documented HTTPS URL.
+These fields appear in every `fetch` entry, regardless of source type.
 
-Requirements:
-- The URL must resolve without authentication.
-- The URL must serve the current version (or a version the recipe explicitly pins).
-- The recipe must record a SHA-256 so tampering or silent version changes are detected.
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `AppName` | string | yes | Must match the `AppName` in the framework manifest exactly. |
+| `Source` | string | yes | One of `"winget"`, `"direct-url"`, `"repo-asset"`, `"manual"`. |
 
-Example recipe entry:
+The remaining fields depend on the `Source` value.
 
-```json
-{
-  "AppName": "Dell SupportAssist",
-  "Source": "direct-url",
-  "Url": "https://dl.dell.com/FOLDER06731690M/1/Dell-SupportAssist.exe",
-  "Sha256": "a1b2c3..."
-}
-```
+### `winget` Source
 
-### `manual`
-
-Used when neither `winget download` nor a stable direct URL exists.
-
-Requirements:
-- The recipe must include a `Notes` field describing exactly where the user obtains the file.
-- The recipe must state the filename the user must place at the target path.
-- The build tool must fail loudly if the file is missing, with a message that repeats the `Notes` field.
-
-Example recipe entry:
-
-```json
-{
-  "AppName": "DellInc.DellSupportAssistforPCs",
-  "Source": "manual",
-  "Notes": "MSIX bundle from the Microsoft Store. Download on a machine with a work or school account, then place the .msix at C:\\Recovery\\OEM\\Apps\\SupportAssist\\UWP\\SupportAssist_x64.msix before building.",
-  "ExpectedFilename": "SupportAssist_x64.msix"
-}
-```
-
-### `repo-asset`
-
-Used when the file ships in the repository itself. This is only appropriate for small customization assets, not vendor installers.
-
----
-
-## Recipe Source Type: `winget`
-
-In a vendor recipe, a `winget` source entry looks like this:
+Use `winget` when the app is available in the winget package repository as an MSI or EXE.
 
 ```json
 {
@@ -354,58 +103,387 @@ In a vendor recipe, a `winget` source entry looks like this:
 }
 ```
 
-Fields:
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `WingetId` | string | yes | The winget package ID. Verify with `winget show --id <id>`. |
+| `WingetArchitecture` | string | no | Forces `--architecture`. Only for multi-arch packages where x64 must be explicit. |
+| `WingetLocale` | string | no | Forces `--locale`. Only for locale-specific installers. |
 
-| Field | Required? | Purpose |
-|---|---|---|
-| `AppName` | Yes | Must match the framework manifest's `AppName` for this app |
-| `Source` | Yes | Must be `"winget"` |
-| `WingetId` | Yes | The winget package ID |
-| `WingetArchitecture` | No | Forces `--architecture`. Use only for multi-arch packages. |
-| `WingetLocale` | No | Forces `--locale`. Use only for locale-specific installers. |
+The build tool runs:
 
-The build tool reads this entry, invokes `Resolve-WingetPackage.ps1`, and stages the resulting file at the path the framework manifest declares for `AppName`.
+```powershell
+winget download `
+    --id $WingetId `
+    --download-directory $StagingDir `
+    --accept-source-agreements `
+    --accept-package-agreements `
+    --disable-interactivity
+```
+
+The downloaded file is staged at the path the framework manifest declares for this `AppName`. The recipe does not declare the target path.
+
+**Limitations:**
+
+- `winget download` does not work for MSStore-only packages (UWP, MSIX) without a work or school account. Those must use `manual`.
+- The downloaded filename changes with the package version. The build tool does not depend on a fixed name — it picks the single new file from the download directory.
+
+See [docs/WINGET-DOWNLOAD.md](WINGET-DOWNLOAD.md) for the full `winget download` behaviour.
+
+### `direct-url` Source
+
+Use `direct-url` when the vendor publishes the installer at a stable HTTPS URL.
+
+```json
+{
+  "AppName": "Dell SupportAssist",
+  "Source": "direct-url",
+  "Url": "https://dl.dell.com/FOLDER06731690M/1/Dell-SupportAssist.exe",
+  "Sha256": "a1b2c3d4e5f6..."
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `Url` | string | yes | Must resolve without authentication. |
+| `Sha256` | string | recommended | 64-character lowercase hex SHA-256 of the file. Strongly recommended. |
+| `Version` | string | no | Informational. Recorded for changelog and diff review. |
+
+If `Sha256` is provided, the tool verifies the downloaded file against it and fails on mismatch. If `Sha256` is omitted, the tool computes the hash, emits a warning, and records the observed hash in its log so the recipe can be updated with a follow-up PR.
+
+The downloaded file is staged at the path the framework manifest declares for this `AppName`.
+
+### `repo-asset` Source
+
+Use `repo-asset` when the file ships in the repository itself, under `vendors/<Vendor>/Assets/`. This is only appropriate for small customization assets, not vendor installers.
+
+```json
+{
+  "AppName": "Dell Customizations",
+  "Source": "repo-asset",
+  "AssetPath": "Assets\\Customizations.ps1"
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `AssetPath` | string | yes | Relative path under `vendors/<Vendor>/`. |
+
+The build tool copies the file from `vendors/<Vendor>/<AssetPath>` to the path the framework manifest declares for this `AppName`.
+
+**File size limit:** No file under `Assets/` should exceed 10 MB unless it is a wallpaper or theme asset. If you believe a larger file belongs in `Assets/`, open an issue first and explain why.
+
+### `manual` Source
+
+Use `manual` when neither `winget` nor a stable direct URL exists. Every `manual` entry shifts work onto every user of the recipe, so use it as a last resort.
+
+```json
+{
+  "AppName": "DellInc.DellSupportAssistforPCs",
+  "Source": "manual",
+  "Notes": "MSIX bundle from the Microsoft Store. Download on a machine with a work or school account, then place the .msix at C:\\Recovery\\OEM\\Apps\\SupportAssist\\UWP\\SupportAssist_x64.msix before building.",
+  "ExpectedFilename": "SupportAssist_x64.msix"
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `Notes` | string | yes | Instructions the user follows to obtain the file. Printed in the build summary and log. |
+| `ExpectedFilename` | string | yes | The filename the user must supply. Used to verify the file is present at the expected path. |
+
+The build tool does not attempt a download. It checks whether the expected file is already present at the framework manifest's `InstallerPath`. If it is present, the build proceeds. If not, the app is recorded in the build summary as pending, and the archive is built without it. The user is told exactly what is missing and where to place it.
+
+When you use `manual`, describe the situation in a comment in the recipe (JSON does not support comments, so put it in a sibling `README.md` under `vendors/<Vendor>/`). Future maintainers will thank you.
 
 ---
 
-## Automation Notes
+## The `assets` Array
 
-### Caching
+The `assets` array declares committed customization files that must ship inside the archive. Every entry has a `Source` (a path under `vendors/<Vendor>/Assets/`) and a `TargetPath` (a path relative to the archive root).
 
-The build tool caches downloaded installers by SHA-256 or URL. If a file with the expected hash already exists in `cache/`, the download is skipped. This means:
+```json
+{
+  "assets": [
+    {
+      "Source": "Assets\\Customizations.ps1",
+      "TargetPath": "."
+    },
+    {
+      "Source": "Assets\\csup.txt",
+      "TargetPath": "."
+    },
+    {
+      "Source": "Assets\\gpsFix.reg",
+      "TargetPath": "."
+    },
+    {
+      "Source": "Assets\\OEMinfo.reg",
+      "TargetPath": "."
+    },
+    {
+      "Source": "Assets\\unattend.xml",
+      "TargetPath": "."
+    },
+    {
+      "Source": "Assets\\OEM.7z",
+      "TargetPath": "."
+    },
+    {
+      "Source": "Assets\\Customizations\\Dell.7z",
+      "TargetPath": "Customizations"
+    },
+    {
+      "Source": "Assets\\Customizations\\G-series.7z",
+      "TargetPath": "Customizations"
+    }
+  ]
+}
+```
 
-- Rebuilding an unchanged vendor is fast.
-- Changing one app in a ten-app recipe re-downloads only that one app.
-- A network outage mid-build does not require re-downloading what already succeeded.
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `Source` | string | yes | Relative path under `vendors/<Vendor>/`. Must exist on disk. |
+| `TargetPath` | string | yes | Relative path inside the archive. `"."` places the file at the archive root. |
 
-The cache lives at `cache/` at the repository root and is gitignored. See [CONTRIBUTING.md](../CONTRIBUTING.md) for the cache layout.
+A `TargetPath` of `"."` places the file at the archive root. Any other value places it under a folder of that name. Nested paths use backslashes (`"Customizations\\Wallpapers"`).
 
-### Retry logic
+When the archive is extracted on the target, the top-level structure is:
 
-The wrapper script retries downloads with exponential backoff:
+```
+<staging>\
+├── Customizations.ps1
+├── csup.txt
+├── gpsFix.reg
+├── OEMinfo.reg
+├── unattend.xml
+├── OEM.7z
+├── Customizations\
+│   ├── Dell.7z
+│   └── G-series.7z
+└── Apps\
+    ├── CommandCenter\
+    ├── CommandUpdate\
+    └── ...
+```
 
-- Up to 3 attempts
-- Initial delay 5 seconds, multiplied by 1.5 each retry, capped at 30 seconds
-- Hash verification on each attempt
-
-If all attempts fail, the script throws and the build stops. The user can re-run and the cache preserves what succeeded.
-
-### Hash verification
-
-`winget download` verifies the installer hash against the manifest it fetched. The build tool does **not** re-verify — winget's verification is sufficient for `winget` sources. For `direct-url` sources, the build tool performs its own SHA-256 check against the hash recorded in the recipe.
-
-### Logging
-
-`winget download` output goes to the console. The build tool captures it and writes it to the build log at `C:\ProgramData\MDT-OEM-Extensibility\Logs\<Vendor>.log` (or the path configured via `-LogPath`).
+Everything declared in `assets` lands at the top level or under the folders named in `TargetPath`. Everything declared in `fetch` lands under `Apps\` at the path the framework manifest declares.
 
 ---
 
-## Related Documentation
+## Bundling Nested Archives
 
-- [docs/BUILDING-PACKS.md](BUILDING-PACKS.md) — full build workflow
-- [docs/ADDING-A-VENDOR.md](ADDING-A-VENDOR.md) — how to author a vendor recipe
-- [docs/RECIPE-SCHEMA.md](RECIPE-SCHEMA.md) — complete recipe field reference
-- [docs/TROUBLESHOOTING.md](TROUBLESHOOTING.md) — general troubleshooting
-- [winget documentation](https://learn.microsoft.com/en-us/windows/package-manager/winget/) — Microsoft's own reference
-- [winget.run](https://winget.run/) — web-based package search
-- [github.com/microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) — manifest repository
+Some vendor payloads contain nested `.7z` files that are extracted during deployment, not during the build. For example, the Dell payload ships:
+
+- `OEM.7z` — infrastructure extracted to `C:\OEM` by `Customizations.ps1`
+- `Customizations\Dell.7z` — wallpapers and themes for the default family
+- `Customizations\G-series.7z` — additional assets for the G-series family
+
+These nested archives are **content**, not build output. The recipe treats them as `assets` and copies them into the archive unchanged. The build tool does not extract, rebuild, or inspect them.
+
+The rationale: the nested archives are extracted by `Customizations.ps1` at deployment time with logic that lives in the deployment repository. The build tool has no reason to know what is inside them. It just ensures they land at the right path inside the parent archive.
+
+If you need to build a nested archive from sources, do that manually and commit the resulting `.7z` to `Assets/`. The tool does not build nested archives.
+
+---
+
+## Framework Manifest Alignment
+
+The recipe and the framework manifest must agree on the set of apps. The build tool validates this and fails on any mismatch:
+
+```
+[ERROR] Manifest and recipe are out of sync
+[ERROR]   In manifest but not in recipe: Dell Command | Update for Windows Universal
+[ERROR]   In recipe but not in manifest: DellCmdUpdate
+```
+
+**Every `AppName` in the framework manifest must have exactly one `fetch` entry in the recipe.** Conversely, every `fetch` entry must reference an `AppName` that exists in the framework manifest.
+
+The build tool does **not** require field-level duplication. The framework manifest declares the install behaviour (`InstallerPath`, `InstallerArgs`, eligibility, pinning). The recipe declares only the fetch behaviour (`Source`, `WingetId` or `Url`, and so on). There is no overlap.
+
+**Where the framework manifest lives:**
+
+```
+\\SERVER\DeploymentShare$\<arch>\$OEM$\$1\Recovery\OEM\Apps\Manifests\<Vendor>.json
+```
+
+**Where the recipe lives:**
+
+```
+vendors\<Vendor>\Recipe.json
+```
+
+**How they are paired:** the recipe's `frameworkManifest` field names the manifest filename. The tool loads the manifest from the deployment share path (passed via `-ManifestPath`) and matches apps by `AppName`.
+
+---
+
+## Recipe Versioning
+
+The `recipeVersion` field declares which schema version the recipe targets. This lets the build tool refuse to load a recipe written for a newer schema, and lets future schema changes be staged without breaking existing recipes.
+
+Current version: **`"1.0"`**
+
+When the schema changes in a backward-compatible way (new optional field, new source type), the version stays at `1.0`. When the schema changes in a breaking way (required field added, field renamed, field removed), the version bumps to `1.1`, `2.0`, and so on, and the build tool refuses to load older recipes until they are updated.
+
+No migrations are automated. When a breaking change occurs, users update their recipes by hand.
+
+---
+
+## Validation Rules
+
+The build tool enforces the following rules at load time. A recipe that fails any rule is rejected before any download or packing work begins.
+
+| Rule | What It Checks |
+|---|---|
+| Recipe file exists | `vendors/<Vendor>/Recipe.json` must exist. |
+| JSON is valid | The file must parse as JSON. |
+| Schema is valid | The file must match `schema/vendor-recipe.schema.json`. |
+| Recipe version supported | `recipeVersion` must be `"1.0"` (or a version the tool understands). |
+| Vendor name matches folder | `name` must equal the folder name under `vendors/`. |
+| Architecture is known | `architecture` must be `"x64"` or `"x86"`. |
+| Framework manifest exists | The manifest named in `frameworkManifest` must exist at the configured manifest path. |
+| App names match exactly | Every `AppName` in the manifest must have a matching entry in `fetch`, and vice versa. |
+| Every source is explicit | Every `fetch` entry must have a `Source` field with one of the four valid values. |
+| Source-specific fields present | `WingetId` for `winget`, `Url` for `direct-url`, `AssetPath` for `repo-asset`, `Notes` and `ExpectedFilename` for `manual`. |
+| Asset files exist | Every `assets` entry's `Source` must exist on disk. |
+| Asset paths are relative | No absolute paths in `Source` or `TargetPath`. |
+| Asset sizes are reasonable | No file under `Assets/` exceeds 10 MB unless it is a wallpaper or theme asset. |
+
+Failing any rule produces a clear error and a non-zero exit code. The tool never silently skips a bad entry.
+
+---
+
+## Complete Example
+
+A complete Dell recipe, abbreviated for illustration:
+
+```json
+{
+  "recipeVersion": "1.0",
+  "name": "Dell",
+  "frameworkManifest": "Dell.json",
+  "architecture": "x64",
+
+  "fetch": [
+    {
+      "AppName": "Microsoft.WindowsAppRuntime.1.8",
+      "Source": "winget",
+      "WingetId": "Microsoft.WindowsAppRuntime.1.8"
+    },
+    {
+      "AppName": "Microsoft .NET Windows Desktop Runtime 8",
+      "Source": "winget",
+      "WingetId": "Microsoft.DotNet.DesktopRuntime.8"
+    },
+    {
+      "AppName": "Dell SupportAssist",
+      "Source": "direct-url",
+      "Url": "https://dl.dell.com/FOLDER06731690M/1/Dell-SupportAssist.exe",
+      "Sha256": "a1b2c3d4e5f6..."
+    },
+    {
+      "AppName": "Dell Command | Update for Windows Universal",
+      "Source": "winget",
+      "WingetId": "Dell.CommandUpdate.Universal"
+    },
+    {
+      "AppName": "Dell Optimizer",
+      "Source": "winget",
+      "WingetId": "Dell.Optimizer"
+    },
+    {
+      "AppName": "Alienware Command Center (v6)",
+      "Source": "direct-url",
+      "Url": "https://dl.dell.com/FOLDER.../Alienware-Command-Center-Application-Full-Installer.exe",
+      "Sha256": "b2c3d4e5f6a1..."
+    },
+    {
+      "AppName": "Alienware Command Center (v5)",
+      "Source": "direct-url",
+      "Url": "https://dl.dell.com/FOLDER.../Alienware-Command-Center-5-x-Full-Installer.exe",
+      "Sha256": "c3d4e5f6a1b2..."
+    },
+    {
+      "AppName": "DellInc.DellSupportAssistforPCs",
+      "Source": "manual",
+      "Notes": "MSIX bundle from the Microsoft Store. Download on a machine with a work or school account, then place the .msix at C:\\Recovery\\OEM\\Apps\\SupportAssist\\UWP\\SupportAssist_x64.msix before building.",
+      "ExpectedFilename": "SupportAssist_x64.msix"
+    }
+  ],
+
+  "assets": [
+    {
+      "Source": "Assets\\Customizations.ps1",
+      "TargetPath": "."
+    },
+    {
+      "Source": "Assets\\csup.txt",
+      "TargetPath": "."
+    },
+    {
+      "Source": "Assets\\gpsFix.reg",
+      "TargetPath": "."
+    },
+    {
+      "Source": "Assets\\OEMinfo.reg",
+      "TargetPath": "."
+    },
+    {
+      "Source": "Assets\\unattend.xml",
+      "TargetPath": "."
+    },
+    {
+      "Source": "Assets\\OEM.7z",
+      "TargetPath": "."
+    },
+    {
+      "Source": "Assets\\Customizations\\Dell.7z",
+      "TargetPath": "Customizations"
+    },
+    {
+      "Source": "Assets\\Customizations\\G-series.7z",
+      "TargetPath": "Customizations"
+    }
+  ]
+}
+```
+
+---
+
+## Field Reference Tables
+
+### Top-Level Fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `recipeVersion` | string | yes | Schema version. Currently `"1.0"`. |
+| `name` | string | yes | Vendor token. Must match folder name. |
+| `frameworkManifest` | string | yes | Filename of the framework manifest. |
+| `architecture` | string | yes | `"x64"` or `"x86"`. |
+| `fetch` | array | yes | App fetch entries. |
+| `assets` | array | no | Committed asset entries. |
+
+### `fetch` Entry Fields
+
+| Field | Type | Required For | Description |
+|---|---|---|---|
+| `AppName` | string | all sources | Matches the framework manifest entry exactly. |
+| `Source` | string | all sources | `"winget"`, `"direct-url"`, `"repo-asset"`, or `"manual"`. |
+| `WingetId` | string | `winget` | Winget package ID. |
+| `WingetArchitecture` | string | `winget` (optional) | Forces `--architecture`. |
+| `WingetLocale` | string | `winget` (optional) | Forces `--locale`. |
+| `Url` | string | `direct-url` | Direct download URL. |
+| `Sha256` | string | `direct-url` (recommended) | SHA-256 of the downloaded file. |
+| `Version` | string | `direct-url` (optional) | Informational version string. |
+| `AssetPath` | string | `repo-asset` | Relative path under `vendors/<Vendor>/`. |
+| `Notes` | string | `manual` | Instructions for obtaining the file. |
+| `ExpectedFilename` | string | `manual` | Filename the user must supply. |
+
+### `assets` Entry Fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `Source` | string | yes | Relative path under `vendors/<Vendor>/`. |
+| `TargetPath` | string | yes | Relative path inside the archive. `"."` for archive root. |
+
+---
+
+*See [docs/ADDING-A-VENDOR.md](ADDING-A-VENDOR.md) for a worked example of authoring a recipe, [docs/BUILDING-PACKS.md](BUILDING-PACKS.md) for the build workflow, and [docs/WINGET-DOWNLOAD.md](WINGET-DOWNLOAD.md) for `winget download` behaviour.*
