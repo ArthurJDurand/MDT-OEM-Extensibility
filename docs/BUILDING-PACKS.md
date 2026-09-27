@@ -1,565 +1,657 @@
-# Building OEM Packs
+# Adding a Vendor
 
-This document walks through the end-to-end process of building a vendor payload archive — from cloning the repository to a validated `<Vendor>.7z` ready to drop into a deployment share.
+This document walks through adding a new OEM vendor to the build system. It uses Dell as the reference: Dell is the most complete vendor in the repository, and its recipe, assets, and build flow illustrate every pattern you will need.
 
-The workflow is the same for every vendor. What changes is the set of apps, the customization assets, and the sources each app is fetched from. Dell is the reference vendor with the most complete recipe.
+If you are looking to add a new app to an existing vendor, see the "Extending an Existing Vendor" section at the end.
 
 ---
 
 ## Table of Contents
 
-- [Overview](#overview)
-- [Prerequisites](#prerequisites)
-- [Before Your First Build](#before-your-first-build)
-- [Building One Vendor](#building-one-vendor)
-- [Building Multiple Vendors](#building-multiple-vendors)
-- [Building All Vendors](#building-all-vendors)
-- [What Happens During a Build](#what-happens-during-a-build)
-- [Validating the Archive](#validating-the-archive)
-- [Placing the Archive in Your Deployment Share](#placing-the-archive-in-your-deployment-share)
-- [Rebuilding After Changes](#rebuilding-after-changes)
-- [Manual Sources](#manual-sources)
-- [Cache Management](#cache-management)
-- [Advanced Options](#advanced-options)
-- [What Good Looks Like](#what-good-looks-like)
-- [Troubleshooting](#troubleshooting)
+- [Before You Start](#before-you-start)
+- [Overview of the Vendor Structure](#overview-of-the-vendor-structure)
+- [Step 1 — Create the Vendor Folder](#step-1--create-the-vendor-folder)
+- [Step 2 — Gather the Framework Manifest](#step-2--gather-the-framework-manifest)
+- [Step 3 — Inventory the Apps](#step-3--inventory-the-apps)
+- [Step 4 — Classify Each App's Source](#step-4--classify-each-apps-source)
+- [Step 5 — Build the Recipe Skeleton](#step-5--build-the-recipe-skeleton)
+- [Step 6 — Populate the `fetch` Array](#step-6--populate-the-fetch-array)
+- [Step 7 — Add Committed Assets](#step-7--add-committed-assets)
+- [Step 8 — Populate the `assets` Array](#step-8--populate-the-assets-array)
+- [Step 9 — Validate the Recipe](#step-9--validate-the-recipe)
+- [Step 10 — Build the Archive](#step-10--build-the-archive)
+- [Step 11 — Verify the Archive](#step-11--verify-the-archive)
+- [Step 12 — Commit and Open a PR](#step-12--commit-and-open-a-pr)
+- [Extending an Existing Vendor](#extending-an-existing-vendor)
+- [The Dell Reference](#the-dell-reference)
+- [Common Pitfalls](#common-pitfalls)
 
 ---
 
-## Overview
+## Before You Start
 
-A build does four things:
+Adding a vendor is a substantial contribution. Before you begin, confirm the following:
 
-1. **Reads the recipe.** `vendors\<Vendor>\Recipe.json` declares what to fetch, from where, at what version.
-2. **Fetches missing content.** Downloads installers into `cache\` (or reuses cached copies). Sources are `winget`, `direct-url`, `repo-asset`, or `manual`.
-3. **Stages and packs.** Assembles the extracted content into a staging folder that mirrors the archive's internal structure, then packs it into `<Vendor>.7z`.
-4. **Validates.** Checks the archive against the framework manifest in your deployment share to ensure every app the framework expects is present at the expected path.
+1. **The vendor is in the supported list.** The build tool currently recognizes these eleven vendors:
 
-The output is a single `<Vendor>.7z` file. Place it at `\\SERVER\Shared\OEM\x64\<Vendor>.7z` (and `\x86\` if you support 32-bit hardware). The deployment framework picks it up automatically.
+   `Dell`, `HP`, `Lenovo`, `ASUS`, `Acer`, `MSI`, `Gigabyte`, `Dynabook`, `Huawei`, `Microsoft`, `Proline`
+
+   If you want to add a vendor that is not in the list, open a Discussion first. Adding a vendor requires updating the framework's vendor detection and manifest in the deployment repository, which is a coordinated change across two repositories.
+
+2. **You have access to a machine from that vendor.** You cannot test a vendor recipe without hardware to validate it against. Emulators and VMs do not exhibit the manufacturer and model strings that the deployment framework reads.
+
+3. **You have write access to the deployment share.** The recipe is validated against the framework manifest, which lives in your deployment share at:
+
+   ```
+   \\SERVER\DeploymentShare$\x64\$OEM$\$1\Recovery\OEM\Apps\Manifests\<Vendor>.json
+   ```
+
+4. **You have cloned this repository and the deployment repository.** The recipe lives here; the manifest lives in the deployment share.
+
+5. **You have a working copy of 7-Zip, `winget`, and PowerShell 5.1 or later.** See [docs/BUILDING-PACKS.md](BUILDING-PACKS.md) for the full prerequisites list.
 
 ---
 
-## Prerequisites
+## Overview of the Vendor Structure
 
-Before your first build, ensure the following are installed and available on your build host:
+Every vendor folder has the same shape:
 
-| Requirement | Minimum | How to verify |
-|---|---|---|
-| Windows | Windows 10 1809+ or Windows 11 | `winver` |
-| PowerShell | 5.1 or 7 | `$PSVersionTable.PSVersion` |
-| 7-Zip | Any recent version | `Test-Path "C:\Program Files\7-Zip\7z.exe"` |
-| winget (App Installer) | Latest from Microsoft Store | `winget --version` |
-| Disk space | 10 GB free for cache, plus room for staging | `Get-PSDrive C` |
-| Network access | Vendor CDNs and Microsoft winget endpoints | `Test-NetConnection download.microsoft.com -Port 443` |
+```
+vendors/<Vendor>/
+├── Recipe.json                The build recipe (this document describes how to write it)
+├── README.md                  Vendor-specific build notes (optional but recommended)
+├── Assets/                    Committed customization files
+│   ├── Customizations.ps1
+│   ├── csup.txt
+│   ├── gpsFix.reg
+│   ├── OEMinfo.reg
+│   ├── unattend.xml
+│   ├── OEM.7z
+│   └── Customizations/
+│       ├── <Vendor>.7z
+│       └── <Family>.7z
+└── Overrides/                 Optional manual URL overrides (advanced; usually empty)
+```
 
-You do **not** need administrator rights on the build host. The tool writes only to the repository folder, the cache folder, and the output path you specify.
+Not every vendor needs every asset. The Dell structure is one example. Microsoft (Surface) has a much smaller set; Gigabyte and Proline currently have almost no assets at all.
 
-You **do** need write access to the output path. If you are building directly into a deployment share over SMB, verify you can create and delete files there:
+The **only required file** is `Recipe.json`. Everything else is optional, but a recipe without committed assets will only fetch installers and won't apply any vendor customizations.
+
+---
+
+## Step 1 — Create the Vendor Folder
+
+If the vendor folder does not exist yet, create it:
 
 ```powershell
-New-Item "\\SERVER\Shared\OEM\x64\_write-test.txt" -Force
-Remove-Item "\\SERVER\Shared\OEM\x64\_write-test.txt" -Force
+New-Item -Path "vendors\<Vendor>" -ItemType Directory -Force
+New-Item -Path "vendors\<Vendor>\Assets" -ItemType Directory -Force
 ```
+
+The `vendors/<Vendor>/` folder is the entry point. The `Recipe.json` file, any vendor-specific `README.md`, and the `Assets/` tree live inside it.
+
+The vendor name must match the list of supported vendors exactly (case-sensitive). `Dell`, not `DELL`. `HP`, not `Hp`.
 
 ---
 
-## Before Your First Build
+## Step 2 — Gather the Framework Manifest
 
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/ArthurJDurand/MDT-OEM-Extensibility.git C:\Source\MDT-OEM-Extensibility
-cd C:\Source\MDT-OEM-Extensibility
-```
-
-### 2. Confirm the framework manifest is reachable
-
-The tool validates the built archive against the framework's manifest, which lives in your deployment share:
+Before writing a recipe, you need to know which apps the deployment framework expects for this vendor. The manifest lives in the deployment share:
 
 ```
 \\SERVER\DeploymentShare$\x64\$OEM$\$1\Recovery\OEM\Apps\Manifests\<Vendor>.json
 ```
 
-If this path is different in your environment, pass `-ManifestPath` on every build. The tool cannot guess.
+Read it. Every `AppName` in the manifest must have a matching `fetch` entry in your recipe. If the manifest is empty or does not exist, you need to add the manifest to the deployment repository first. That is a separate change; open an issue to coordinate.
 
-```powershell
-Test-Path "\\SERVER\DeploymentShare$\x64\$OEM$\$1\Recovery\OEM\Apps\Manifests\Dell.json"
+Example for Dell (abbreviated):
+
+```json
+{
+  "name": "Dell",
+  "apps": [
+    {
+      "AppName": "Microsoft.WindowsAppRuntime.1.8",
+      "InstallerPath": "C:\\Recovery\\OEM\\Apps\\SupportAssist\\PreinstallKit",
+      "InstallerFilter": "WindowsAppRuntimeInstall*",
+      "InstallerArgs": "--quiet"
+    },
+    {
+      "AppName": "Dell SupportAssist",
+      "InstallerPath": "C:\\Recovery\\OEM\\Apps\\SupportAssist",
+      "InstallerFilter": "Dell SupportAssist*",
+      "InstallerArgs": ""
+    },
+    {
+      "AppName": "Dell Command | Update for Windows Universal",
+      "InstallerPath": "C:\\Recovery\\OEM\\Apps\\CommandUpdate",
+      "InstallerFilter": "Dell-Command-Update*",
+      "InstallerArgs": "/s /l=C:\\ProgramData\\OEM\\Logs\\DellCommandUpdateUniversal_Install.log"
+    }
+  ]
+}
 ```
 
-If this returns `False`, either your deployment share is not populated, or the manifest lives elsewhere. See the main repository's [`docs/APPS-FRAMEWORK.md`](https://github.com/ArthurJDurand/MDT-Zero-Touch-Deployment/blob/main/docs/APPS-FRAMEWORK.md) for the expected layout.
+Note the `InstallerPath` values. Those are the paths the framework expects each file to be staged at, both on the target (after extraction) and inside the archive. The build tool uses those paths as the target for each fetched installer. Your recipe does not need to restate them.
 
-### 3. Confirm the vendor has a recipe
-
-```powershell
-Get-ChildItem vendors -Directory | Select-Object Name
-```
-
-Eleven vendors should appear. Not all will have a complete `Recipe.json` today. Dell is complete; the rest are scaffolds. If you are building a scaffold vendor, the build will report missing sources.
-
-### 4. Confirm `winget` works
-
-```powershell
-winget source list
-```
-
-You should see `winget` and `msstore` as configured sources. If `winget` is missing or broken, the build will skip all `winget` sources and fail on those apps.
-
-### 5. Do a dry run on Dell
-
-```powershell
-.\tools\Build-OEMPack.ps1 -Vendor Dell -DryRun
-```
-
-A dry run resolves every source, reports what would be downloaded, and exits without downloading anything. This is the fastest way to verify your environment before committing to a real build.
+**Key point:** The framework manifest is authoritative for install behaviour. The recipe is authoritative for fetch behaviour. Do not duplicate anything from the manifest into the recipe except the `AppName`.
 
 ---
 
-## Building One Vendor
+## Step 3 — Inventory the Apps
 
-The standard invocation:
+List every app the manifest declares. For each one, gather:
+
+- The `AppName` (exact string from the manifest)
+- The `InstallerPath` and `InstallerFilter` (to know what filename the tool needs to produce)
+- The vendor's download page for that app (to find the source URL or winget ID)
+- The expected installer file type (`.exe`, `.msi`, `.msix`, and so on)
+
+Write this down in a scratch file. You will refer to it while writing the recipe.
+
+Example inventory for Dell:
+
+| AppName | InstallerPath | Expected File Type | Source? |
+|---|---|---|---|
+| `Microsoft.WindowsAppRuntime.1.8` | `Apps\SupportAssist\PreinstallKit` | `.exe` | winget |
+| `Microsoft .NET Windows Desktop Runtime 8` | `Apps\SupportAssist\PreinstallKit` | `.exe` | winget |
+| `Dell SupportAssist` | `Apps\SupportAssist` | `.exe` | direct URL |
+| `Dell Command | Update for Windows Universal` | `Apps\CommandUpdate` | `.exe` | winget |
+| `Alienware Command Center (v6)` | `Apps\CommandCenter\v6` | `.exe` | direct URL |
+| `DellInc.DellSupportAssistforPCs` | `Apps\SupportAssist\UWP` | `.msix` | manual (MSStore only) |
+
+The inventory is your roadmap. Every row becomes one entry in the recipe's `fetch` array.
+
+---
+
+## Step 4 — Classify Each App's Source
+
+For each app, decide which of the four source types applies. Use this decision tree:
+
+```
+Is the app published in the winget repository as an MSI or EXE?
+├── Yes → Source: winget
+└── No → Continue.
+
+Does the vendor publish the installer at a stable HTTPS URL?
+├── Yes → Source: direct-url
+└── No → Continue.
+
+Does the file ship in the repository under vendors/<Vendor>/Assets/?
+├── Yes → Source: repo-asset
+└── No → Source: manual
+```
+
+The order matters. Prefer `winget` over `direct-url`, because `winget` handles version pinning and hash verification automatically. Prefer `direct-url` over `manual`, because it keeps the build unattended. Use `manual` only when nothing else works.
+
+### Testing a `winget` candidate
+
+Before you commit to a `winget` source, verify the package downloads:
 
 ```powershell
-.\tools\Build-OEMPack.ps1 -Vendor Dell -OutputPath \\SERVER\Shared\OEM\x64
+$tmp = "$env:TEMP\winget-test"
+New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+
+winget download `
+    --id <WingetId> `
+    --download-directory $tmp `
+    --accept-source-agreements `
+    --accept-package-agreements `
+    --disable-interactivity
+
+if ($LASTEXITCODE -eq 0) {
+    Get-ChildItem $tmp
+} else {
+    "Failed with exit code $LASTEXITCODE"
+}
 ```
 
-What this does:
+If the download succeeds and produces an `.msi` or `.exe`, the app is a valid `winget` source. If it fails, or produces a `.msix` or `.appxbundle`, use `direct-url` or `manual` instead.
 
-1. Loads `vendors\Dell\Recipe.json`
-2. Loads the framework manifest from `\\SERVER\DeploymentShare$\x64\$OEM$\$1\Recovery\OEM\Apps\Manifests\Dell.json`
-3. Validates that every app in the manifest has a matching recipe entry
-4. For each app:
-   - If already in `cache\` and hash matches, skip the download
-   - If `winget` source, invoke `Resolve-WingetPackage.ps1`
-   - If `direct-url` source, invoke `Resolve-OEMUrl.ps1`
-   - If `repo-asset` source, copy from `vendors\Dell\Assets\`
-   - If `manual` source, skip and record in the summary
-5. Assemble a staging folder that mirrors the archive structure
-6. Pack the staging folder into `Dell.7z` at the output path
-7. Validate the archive against the framework manifest
+### Testing a `direct-url` candidate
 
-Expect **10 minutes to 2 hours** for a first build of Dell, depending on cache state, network speed, and how many apps are manual.
+For a direct URL, download it and record the hash:
 
-### Console output
+```powershell
+$url = "https://dl.dell.com/FOLDER.../Dell-SupportAssist.exe"
+$dest = "$env:TEMP\Dell-SupportAssist.exe"
 
-The tool prints progress as it works:
-
-```
-[2026-01-15 14:32:18] [INFO]    Starting build for vendor: Dell
-[2026-01-15 14:32:18] [INFO]    Loading recipe: vendors\Dell\Recipe.json
-[2026-01-15 14:32:18] [INFO]    Loading manifest: \\SERVER\DeploymentShare$\...\Dell.json
-[2026-01-15 14:32:19] [SUCCESS] Manifest and recipe are in sync (14 apps)
-[2026-01-15 14:32:19] [INFO]    Cache: C:\Source\MDT-OEM-Extensibility\cache
-[2026-01-15 14:32:19] [INFO]    Staging: C:\Users\me\AppData\Local\Temp\MDT-OEM-Dell-abc123
-[2026-01-15 14:32:20] [INFO]    [ 1/14] Microsoft.WindowsAppRuntime.1.8 (winget)
-[2026-01-15 14:32:21] [INFO]      Cache hit: a1b2c3d4e5f6...
-[2026-01-15 14:32:21] [SUCCESS] [ 1/14] Staged
-[2026-01-15 14:32:21] [INFO]    [ 2/14] Microsoft .NET Windows Desktop Runtime 8 (winget)
-[2026-01-15 14:32:22] [INFO]      Cache miss — downloading
-...
+Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+(Get-FileHash -Path $dest -Algorithm SHA256).Hash.ToLower()
 ```
 
-### Console summary
+Copy the hash into the recipe. The build tool will verify every download against it.
 
-At the end:
+---
+
+## Step 5 — Build the Recipe Skeleton
+
+Create `vendors/<Vendor>/Recipe.json` with the top-level fields:
+
+```json
+{
+  "recipeVersion": "1.0",
+  "name": "Dell",
+  "frameworkManifest": "Dell.json",
+  "architecture": "x64",
+  "fetch": [],
+  "assets": []
+}
+```
+
+Fill in:
+
+- `recipeVersion` — always `"1.0"` for the current schema
+- `name` — must match the folder name exactly
+- `frameworkManifest` — the filename of the framework manifest (usually `<name>.json`)
+- `architecture` — `"x64"` or `"x86"`
+
+Leave `fetch` and `assets` empty for now. You will populate them in the next two steps.
+
+If you are also supporting x86 for this vendor, create a parallel `vendors/<Vendor>-x86/` folder with its own recipe. The two recipes are independent.
+
+---
+
+## Step 6 — Populate the `fetch` Array
+
+For each row in your app inventory, add one entry to the `fetch` array. The fields depend on the source type.
+
+### `winget` entry
+
+```json
+{
+  "AppName": "Dell Command | Update for Windows Universal",
+  "Source": "winget",
+  "WingetId": "Dell.CommandUpdate.Universal"
+}
+```
+
+Add `WingetArchitecture` and `WingetLocale` only if the package needs them (multi-arch packages or locale-specific installers).
+
+### `direct-url` entry
+
+```json
+{
+  "AppName": "Dell SupportAssist",
+  "Source": "direct-url",
+  "Url": "https://dl.dell.com/FOLDER06731690M/1/Dell-SupportAssist.exe",
+  "Sha256": "a1b2c3d4e5f6..."
+}
+```
+
+Always include `Sha256`. Omitting it produces a warning at build time and defeats the purpose of verification.
+
+### `repo-asset` entry
+
+```json
+{
+  "AppName": "Dell Customizations",
+  "Source": "repo-asset",
+  "AssetPath": "Assets\\Customizations.ps1"
+}
+```
+
+The `AssetPath` is relative to `vendors/<Vendor>/`.
+
+### `manual` entry
+
+```json
+{
+  "AppName": "DellInc.DellSupportAssistforPCs",
+  "Source": "manual",
+  "Notes": "MSIX bundle from the Microsoft Store. Download on a machine with a work or school account, then place the .msix at C:\\Recovery\\OEM\\Apps\\SupportAssist\\UWP\\SupportAssist_x64.msix before building.",
+  "ExpectedFilename": "SupportAssist_x64.msix"
+}
+```
+
+The `Notes` field is what the user sees when the build reports the app as pending. Make it actionable: where to obtain the file, and where to place it.
+
+### Ordering
+
+Order the `fetch` entries to match the framework manifest's `apps` array. This makes diff review easier. The build tool does not require the order to match, but reviewers do.
+
+---
+
+## Step 7 — Add Committed Assets
+
+The `Assets/` folder contains everything that ships inside the vendor archive but is not downloaded from the vendor. For Dell, this includes:
+
+- `Customizations.ps1` — the vendor's pre-install customization script
+- `csup.txt` — vendor metadata consumed by `SetupComplete.cmd`
+- `gpsFix.reg` — registry tweaks
+- `OEMinfo.reg` — OEM branding registry
+- `unattend.xml` — OEM-attend overlay for PBR
+- `OEM.7z` — infrastructure extracted to `C:\OEM` by `Customizations.ps1`
+- `Customizations/Dell.7z` — wallpapers and themes for the default family
+- `Customizations/G-series.7z` — additional assets for the G-series family
+
+For your vendor, gather whatever customizations exist. If you are starting from scratch, the minimum useful set is:
+
+- A `Customizations.ps1` (or equivalent) that applies branding
+- A wallpaper or theme pack, packaged as a nested `.7z`
+- Any `.reg` files the customization script depends on
+
+### File size limits
+
+- Wallpapers and theme assets: up to 10 MB per file, 50 MB per vendor total
+- Everything else: up to a few MB per file
+
+If you need to ship something larger, open an issue first. Large binaries should be fetched from an official source at build time, not committed.
+
+### Naming and encoding
+
+- Use descriptive filenames. `Dell-G15-wallpaper.jpg`, not `img001.jpg`.
+- Text files use UTF-8 without BOM.
+- `.reg` files use UTF-16 LE with BOM.
+- Line endings follow the repository's `.gitattributes` rules.
+
+### Where nested archives go
+
+Nested `.7z` files (like `OEM.7z` and `Customizations/Dell.7z`) go under `Assets/` in a folder structure that mirrors what they contain. The `assets` array in the recipe names the target path inside the parent archive.
+
+---
+
+## Step 8 — Populate the `assets` Array
+
+For every file under `Assets/` that must ship inside the archive, add one entry to the `assets` array:
+
+```json
+{
+  "Source": "Assets\\Customizations.ps1",
+  "TargetPath": "."
+}
+```
+
+The `Source` is the path under `vendors/<Vendor>/`. The `TargetPath` is the path inside the archive. `"."` places the file at the archive root.
+
+For nested assets:
+
+```json
+{
+  "Source": "Assets\\Customizations\\Dell.7z",
+  "TargetPath": "Customizations"
+}
+```
+
+This places `Dell.7z` at `Customizations\Dell.7z` inside the archive.
+
+Every file under `Assets/` that you want in the archive must have a matching `assets` entry. Files without an entry are not copied. This is intentional — it lets you keep helper files (a `.gitkeep`, a scratch note) in `Assets/` without shipping them.
+
+---
+
+## Step 9 — Validate the Recipe
+
+Before running a full build, validate the recipe against the schema and the framework manifest:
+
+```powershell
+.\tools\Build-OEMPack.ps1 -Vendor <Vendor> -DryRun
+```
+
+A dry run:
+
+1. Loads the recipe and validates it against `schema/vendor-recipe.schema.json`.
+2. Loads the framework manifest from the deployment share.
+3. Checks that every `AppName` matches between the two.
+4. Checks that every `assets` entry's `Source` file exists on disk.
+5. Reports what would be fetched, what would be manually supplied, and what would be packed.
+
+A clean dry run looks like:
+
+```
+[INFO]    Loaded recipe: vendors\Dell\Recipe.json
+[INFO]    Loaded manifest: \\SERVER\DeploymentShare$\...\Manifests\Dell.json
+[SUCCESS] Manifest and recipe are in sync (14 apps)
+[INFO]    12 apps will be fetched from remote sources
+[INFO]     8 via winget
+[INFO]     4 via direct-url
+[INFO]    1 app is manual (SupportAssist UWP)
+[INFO]    8 assets will be staged
+[SUCCESS] Dry run completed successfully
+```
+
+If the dry run reports errors, fix them before proceeding. Common errors:
+
+| Error | Cause | Fix |
+|---|---|---|
+| "Manifest and recipe are out of sync" | Missing or extra `AppName` | Add or remove `fetch` entries to match the manifest |
+| "Asset not found" | `assets[].Source` points at a missing file | Add the file under `vendors/<Vendor>/Assets/` |
+| "Recipe version not supported" | `recipeVersion` is not `"1.0"` | Set it to `"1.0"` |
+| "Vendor name mismatch" | `name` does not match the folder name | Rename one to match the other |
+
+---
+
+## Step 10 — Build the Archive
+
+Once the dry run passes, run a real build:
+
+```powershell
+.\tools\Build-OEMPack.ps1 -Vendor <Vendor> -OutputPath C:\Output
+```
+
+The build tool:
+
+1. Downloads each `winget` app via `Resolve-WingetPackage.ps1`
+2. Downloads each `direct-url` app via `Resolve-OEMUrl.ps1` and verifies its hash
+3. Copies each `repo-asset` file into the staging folder
+4. Skips `manual` apps and records them in the summary
+5. Copies each asset into the staging folder at its `TargetPath`
+6. Packs the staging folder into `<Vendor>.7z` at the output path
+7. Runs the validator against the built archive
+
+Expect the first build to take 10 minutes to 2 hours depending on the number and size of apps, your network speed, and how many apps are `manual`.
+
+The build prints a summary at the end:
 
 ```
 ═══════════════════════════════════════════════════════════════════
  BUILD SUMMARY: Dell
 ═══════════════════════════════════════════════════════════════════
   Total apps        : 14
-  Downloaded        : 3
-  Cached (skipped)  : 10
+  Downloaded        : 13
+  Cached (skipped)  : 0
   Manual (pending)  : 1
   Failed            : 0
-  Staging folder    : (deleted)
-  Archive           : \\SERVER\Shared\OEM\x64\Dell.7z
+  Archive           : C:\Output\Dell.7z
   Size              : 3.42 GB
-  Duration          : 8m 12s
   SHA-256           : a1b2c3d4e5f6...
 ═══════════════════════════════════════════════════════════════════
+
+  MANUAL APPS STILL PENDING:
+    - DellInc.DellSupportAssistforPCs
+      Notes: MSIX bundle from the Microsoft Store. Download on a machine
+             with a work or school account, then place the .msix at
+             C:\Recovery\OEM\Apps\SupportAssist\UWP\SupportAssist_x64.msix
+             before building.
 ```
 
-If any app failed, the summary lists it with a reason. If any app is `manual`, the summary prints the instructions the recipe provides for obtaining it.
+If the build reports a failure, see [docs/TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ---
 
-## Building Multiple Vendors
+## Step 11 — Verify the Archive
 
-Pass a list of vendors:
-
-```powershell
-.\tools\Build-OEMPack.ps1 -Vendor Dell,HP,Lenovo -OutputPath \\SERVER\Shared\OEM\x64
-```
-
-Each vendor is built independently. If one fails, the others continue. The tool prints a combined summary at the end.
-
-This is useful for a maintenance window: rebuild the three vendors you actually deploy, ignore the rest.
-
----
-
-## Building All Vendors
-
-```powershell
-.\tools\Build-OEMPack.ps1 -All -OutputPath \\SERVER\Shared\OEM\x64
-```
-
-Every vendor with a complete recipe is built in sequence. Vendors with missing apps or manual-only coverage are reported at the end. Expect a long runtime — the full set of eleven vendors, once complete, will fetch on the order of 40–60 GB.
-
-Do not run `-All` on the first build. Build Dell first, verify it works end-to-end, then add vendors.
-
----
-
-## What Happens During a Build
-
-A step-by-step trace for the curious. Skip this section unless something is failing.
-
-### 1. Recipe load and validation
-
-The tool reads `vendors\<Vendor>\Recipe.json`, validates it against `schema\vendor-recipe.schema.json`, and loads the framework manifest from the deployment share.
-
-If the schema validation fails, the build stops with a list of missing or malformed fields. See [`docs/RECIPE-SCHEMA.md`](RECIPE-SCHEMA.md) for the field reference.
-
-### 2. Manifest/recipe sync check
-
-Every `AppName` in the framework manifest must have a matching entry in the recipe. If a manifest entry is missing, the build stops with:
-
-```
-[ERROR] Manifest and recipe are out of sync
-[ERROR]   In manifest but not in recipe: <AppName>
-```
-
-Add the missing recipe entry (see [`docs/ADDING-A-VENDOR.md`](ADDING-A-VENDOR.md)) and rerun.
-
-### 3. Per-app fetch
-
-For each recipe entry, the tool determines the source type and calls the appropriate resolver:
-
-| Source | Resolver | Behavior |
-|---|---|---|
-| `winget` | `Resolve-WingetPackage.ps1` | Runs `winget download` into a temp folder, picks the single new file, moves it to `cache\` |
-| `direct-url` | `Resolve-OEMUrl.ps1` | Downloads the URL with retry and SHA-256 verification, moves it to `cache\` |
-| `repo-asset` | (built-in) | Copies from `vendors\<Vendor>\Assets\` |
-| `manual` | (skipped) | Records the app as pending; continues |
-
-Cache lookup happens first. If `cache\<key>` exists and its hash matches the recipe, the resolver is not called.
-
-### 4. Staging
-
-Once every resolvable app is in `cache\`, the tool builds a staging folder that mirrors the archive structure:
-
-```
-<staging>\
-├── Customizations.ps1
-├── csup.txt
-├── gpsFix.reg
-├── OEMinfo.reg
-├── unattend.xml
-├── OEM.7z
-├── Customizations\
-│   ├── Dell.7z
-│   └── G-series.7z
-└── Apps\
-    ├── CommandCenter\
-    ├── CommandUpdate\
-    └── ...
-```
-
-The layout mirrors the `InstallerPath` values in the framework manifest. Every file the deployment framework expects to find at a specific path ends up at that path inside the archive.
-
-### 5. Packing
-
-The tool invokes `New-OEMAppPack.ps1`, which calls 7-Zip with the correct compression settings:
-
-```powershell
-& "C:\Program Files\7-Zip\7z.exe" a -t7z -mx=5 -mmt=on -bsp1 "<output>.7z" "<staging>\*"
-```
-
-- `-t7z` — 7z format
-- `-mx=5` — normal compression (a good balance of size and speed for installers, which are already compressed)
-- `-mmt=on` — multi-threaded
-- `-bsp1` — progress to stdout
-
-For large archives, the tool splits into `.7z.001`, `.7z.002`, and so on if `-Volume` is passed.
-
-### 6. Validation
-
-The tool invokes `Test-OEMAppPack.ps1` to verify that the built archive contains every app the framework manifest expects, at the expected path. If validation fails, the archive is left in place but the build reports a failure.
-
-### 7. Cleanup
-
-The staging folder is deleted. The cache is left intact for the next build.
-
----
-
-## Validating the Archive
-
-Validation is automatic at the end of every build. To validate independently:
+The build tool automatically runs the validator at the end. To validate independently:
 
 ```powershell
 .\tools\Test-OEMAppPack.ps1 `
-    -Archive \\SERVER\Shared\OEM\x64\Dell.7z `
+    -Archive C:\Output\Dell.7z `
     -Manifest \\SERVER\DeploymentShare$\x64\$OEM$\$1\Recovery\OEM\Apps\Manifests\Dell.json
 ```
 
-The validator:
+A clean validation:
 
-1. Lists the archive contents with 7-Zip.
-2. Parses the framework manifest for every `InstallerPath`.
-3. Confirms each path exists inside the archive.
-4. Reports missing paths and unexpected extras.
+```
+[INFO]    Loading archive: C:\Output\Dell.7z
+[INFO]    Loading manifest: \\SERVER\DeploymentShare$\...\Manifests\Dell.json
+[INFO]    Listing archive contents...
+[SUCCESS] All 14 apps present at the expected paths
+[SUCCESS] All 8 assets present at the expected paths
+[SUCCESS] Validation passed
+```
 
-Exit code `0` means the archive is complete. Any other exit code indicates a mismatch.
-
-To skip validation during a fast rebuild (not recommended for production):
+Then manually inspect the archive:
 
 ```powershell
-.\tools\Build-OEMPack.ps1 -Vendor Dell -OutputPath \\SERVER\Shared\OEM\x64 -SkipValidation
+& "C:\Program Files\7-Zip\7z.exe" l C:\Output\Dell.7z
 ```
+
+Compare the listing against what the framework expects. Pay attention to:
+
+- File paths match the framework manifest's `InstallerPath` + `InstallerFilter`
+- Asset paths match the recipe's `TargetPath`
+- No unexpected files
+- No missing files
+
+If anything is wrong, fix the recipe and rebuild.
+
+### Testing end-to-end (strongly recommended)
+
+For a new vendor, verification against the manifest is not sufficient. You should also:
+
+1. Copy the built archive to your test deployment share at `\\SERVER\Shared\OEM\x64\<Vendor>.7z`
+2. PXE boot a machine from that vendor
+3. Run a full deployment through OOBE
+4. Verify that the OEM apps install and the framework converges to `USER_DONE`
+
+This is the only way to confirm that the archive works end-to-end. A recipe that validates perfectly but fails on real hardware is worse than no recipe at all.
 
 ---
 
-## Placing the Archive in Your Deployment Share
+## Step 12 — Commit and Open a PR
 
-If you built directly into the deployment share's OEM folder (as in the examples above), you are done. The framework picks up the archive at the next deployment.
+Once the build succeeds and the archive is validated:
 
-If you built to a staging location, copy the archive manually:
+1. Commit your changes:
 
-```powershell
-Copy-Item "C:\Output\Dell.7z" "\\SERVER\Shared\OEM\x64\Dell.7z" -Force
-```
-
-If you support 32-bit deployments, also build and copy the x86 variant:
-
-```powershell
-.\tools\Build-OEMPack.ps1 -Vendor Dell -Architecture x86 -OutputPath \\SERVER\Shared\OEM\x86
-```
-
-The x86 build is a **work in progress**. Most x86 recipes are not yet complete. See the main repository's [Known Limitations](https://github.com/ArthurJDurand/MDT-Zero-Touch-Deployment#known-limitations) for the current state.
-
-### Verifying the deployment share has the archive
-
-```powershell
-Get-Item "\\SERVER\Shared\OEM\x64\Dell.7z" | Select-Object Name, Length, LastWriteTime
-```
-
-The `Length` should match the archive size reported in the build summary. The `LastWriteTime` should be recent.
-
-### Offline media
-
-If you build a DEPLOY USB for offline deployment, copy the archive to the USB after the build. See the main repository's [`docs/OFFLINE-MEDIA.md`](https://github.com/ArthurJDurand/MDT-Zero-Touch-Deployment/blob/main/docs/OFFLINE-MEDIA.md) for the USB workflow.
-
----
-
-## Rebuilding After Changes
-
-### Nothing changed
-
-If no app versions have changed and the recipe has not been modified, a rebuild uses the cache for everything and skips downloads. It still repacks the archive, which takes a few minutes.
-
-If you want to verify that nothing changed without repacking:
-
-```powershell
-.\tools\Build-OEMPack.ps1 -Vendor Dell -DryRun
-```
-
-### One app changed
-
-The tool detects the change via the recipe's version or hash field, downloads only the changed app, and repacks. This is the common case — one vendor ships an update, you refresh just that app.
-
-### The recipe changed
-
-Any change to `vendors\<Vendor>\Recipe.json` triggers a full re-resolution of the affected entries. Unaffected entries still use the cache.
-
-### Force a full re-download
-
-```powershell
-.\tools\Build-OEMPack.ps1 -Vendor Dell -OutputPath \\SERVER\Shared\OEM\x64 -Force
-```
-
-`-Force` ignores the cache, re-downloads every app, and repacks. Use this when you suspect the cache is stale or corrupt.
-
-### Purge the cache
-
-```powershell
-.\tools\Build-OEMPack.ps1 -Vendor Dell -PurgeCache
-```
-
-Deletes cached files that are not referenced by any current recipe. Useful when disk space is tight.
-
----
-
-## Manual Sources
-
-Some apps cannot be fetched automatically. The recipe marks them as `manual`. When a build encounters one, it records the app in the summary and continues — but the resulting archive is **incomplete**.
-
-### What the build tells you
-
-```
-[WARN]  Manual source: DellInc.DellSupportAssistforPCs
-[WARN]    Notes: MSIX bundle from the Microsoft Store. Download on a machine
-[WARN]           with a work or school account, then place the .msix at
-[WARN]           C:\Recovery\OEM\Apps\SupportAssist\UWP\SupportAssist_x64.msix
-[WARN]           before building.
-```
-
-### How to satisfy a manual source
-
-1. Obtain the file using the instructions in the `Notes` field.
-2. Place the file at the target path inside the staging folder. The tool creates the staging folder at a temporary location and prints its path in the log.
-3. Rerun the build with `-KeepStaging`:
-   ```powershell
-   .\tools\Build-OEMPack.ps1 -Vendor Dell -OutputPath \\SERVER\Shared\OEM\x64 -KeepStaging
    ```
-4. After the build, remove the staging folder manually.
+   git add vendors/<Vendor>/
+   git commit -m "feat(<vendor>): add vendor recipe"
+   ```
 
-**Alternatively**, stage the file in the cache and mark it in the recipe as `repo-asset`. This is not recommended for large files or files that change frequently, because it commits a vendor binary to the repository.
+   Use the conventional commit format. Scope is the vendor name in lowercase.
 
-**Long-term goal:** reduce the number of `manual` sources to zero by finding official download URLs. If you know of a reliable source for any of the current `manual` apps, open a PR.
+2. Update `CHANGELOG.md` under `[Unreleased]` → `### Added`:
 
----
+   ```
+   - **<Vendor>** — Recipe covering all applications declared in the
+     framework's `Manifests/<Vendor>.json`
+   ```
 
-## Cache Management
+3. Push to your fork and open a PR against `main`. Include in the PR description:
 
-The cache lives at `cache\` under the repository root by default. It is gitignored.
+   - The vendor name
+   - The Windows build you tested on
+   - The hardware model you validated against (if applicable)
+   - The SHA-256 of the built archive
+   - Any apps marked `manual` and why
+   - Any assets you added and what they do
 
-### Cache layout
+4. Wait for review. Reviews focus on:
 
-```
-cache\
-├── winget\
-│   ├── <WingetId>\
-│   │   └── <version>\
-│   │       └── <installer file>
-├── direct-url\
-│   └── <sha256 prefix>\
-│       └── <installer file>
-└── repo-asset\
-    └── <vendor>\
-        └── <asset file>
-```
-
-The cache is content-addressed where possible. A `winget` entry is keyed by winget ID and version. A `direct-url` entry is keyed by SHA-256 prefix. A `repo-asset` entry is keyed by vendor and filename.
-
-### Sizing the cache
-
-Rough estimates for a complete eleven-vendor build:
-
-| Vendor | Cache size (approximate) |
-|---|---|
-| Dell | 4 GB |
-| HP | 2 GB |
-| Lenovo | 2 GB |
-| ASUS | 1.5 GB |
-| Acer | 1 GB |
-| MSI | 1.5 GB |
-| Gigabyte | 500 MB |
-| Dynabook | 300 MB |
-| Huawei | 500 MB |
-| Microsoft | 1 GB |
-| Proline | 200 MB |
-| **Total** | **14.5 GB** |
-
-Add 30–50% for version history as vendors update. A cache can easily reach 25 GB if you rarely purge.
-
-### Overriding the cache path
-
-```powershell
-.\tools\Build-OEMPack.ps1 -Vendor Dell -CachePath D:\Cache
-```
-
-Useful when the repository lives on a small SSD and the cache should live on a larger HDD or network share.
-
-**Do not put the cache on a network share** unless you have no alternative. The latency of reading small files over SMB slows builds considerably.
-
-### Clearing the cache
-
-Full clear:
-
-```powershell
-Remove-Item cache\* -Recurse -Force
-```
-
-Selective clear (only entries not referenced by any recipe):
-
-```powershell
-.\tools\Build-OEMPack.ps1 -PurgeCache
-```
+   - Recipe structure and correctness
+   - Hash verification coverage
+   - `manual` entries — are they justified?
+   - Asset content — is anything committed that should not be?
+   - No personal or machine-specific values in committed files
 
 ---
 
-## Advanced Options
+## Extending an Existing Vendor
 
-| Flag | Purpose |
-|---|---|
-| `-Vendor <name>` | Vendor or comma-separated list of vendors to build |
-| `-All` | Build every vendor with a complete recipe |
-| `-OutputPath <path>` | Where to write the `.7z` archive. Default: current directory. |
-| `-ManifestPath <path>` | Path to the framework manifest folder. Overrides the default. |
-| `-CachePath <path>` | Where to store downloaded content. Default: `cache\` in the repository root. |
-| `-SevenZipPath <path>` | Path to `7z.exe`. Default: `C:\Program Files\7-Zip\7z.exe`. |
-| `-Architecture <arch>` | `x64` (default) or `x86`. Selects the recipe file to use. |
-| `-Volume <size>` | Split the archive into parts of this size, e.g. `3g`. Required for FAT32 targets. |
-| `-Force` | Ignore cache; re-download and repack everything. |
-| `-DryRun` | Resolve and report without downloading or packing. |
-| `-SkipValidation` | Skip the post-build manifest validation. |
-| `-KeepStaging` | Do not delete the staging folder after the build. |
-| `-PurgeCache` | Delete unreferenced cache entries and exit. |
-| `-Verbose` | Print per-file detail. |
-| `-LogPath <path>` | Write the log to this path. Default: `C:\ProgramData\MDT-OEM-Extensibility\Logs\<Vendor>.log`. |
+Adding a new app to an existing vendor is simpler than adding a whole vendor. The workflow:
 
-For the full parameter list, run:
+1. **Add the app to the framework manifest first.** The manifest lives in the deployment repository, not here. If the app you want to add is not in the manifest, it will not be installed even if the recipe fetches it. The manifest change is a separate PR against `MDT-Zero-Touch-Deployment`.
 
-```powershell
-Get-Help .\tools\Build-OEMPack.ps1 -Full
-```
+2. **Add the corresponding `fetch` entry to the recipe.** Match the `AppName` exactly.
+
+3. **If the app is `manual`, add a `Notes` field** explaining how the user obtains the file.
+
+4. **Run a dry run** to confirm the manifest and recipe agree.
+
+5. **Run a real build** and validate the archive.
+
+6. **Open a PR.** Include the framework manifest change and the recipe change as one coordinated PR, or two linked PRs.
+
+### Removing an app
+
+Removing an app from a vendor is the reverse: remove the entry from the framework manifest first, then remove the `fetch` entry from the recipe. A recipe with an orphan `fetch` entry fails validation. A manifest with an orphan `AppName` fails the sync check.
 
 ---
 
-## What Good Looks Like
+## The Dell Reference
 
-A successful build ends with:
+Dell is the most complete vendor in the repository. When you are unsure how to classify or format something, look at `vendors/Dell/Recipe.json` and its `Assets/` folder.
 
-- A `<Vendor>.7z` file at the specified output path
-- A file size in the expected range (see the table in [Cache Management](#cache-management) for rough per-vendor sizes)
-- A SHA-256 printed in the summary
-- A `Failed: 0` count in the summary
-- A `Manual: 0` count in the summary, or a known list of pending manual apps
-- No error lines in the log
+### App sources in the Dell recipe
 
-To double-check:
-
-```powershell
-& "C:\Program Files\7-Zip\7z.exe" t \\SERVER\Shared\OEM\x64\Dell.7z
-```
-
-This runs 7-Zip's archive integrity test. If it passes, the archive is readable.
-
-To compare against the framework manifest one more time:
-
-```powershell
-.\tools\Test-OEMAppPack.ps1 `
-    -Archive \\SERVER\Shared\OEM\x64\Dell.7z `
-    -Manifest \\SERVER\DeploymentShare$\x64\$OEM$\$1\Recovery\OEM\Apps\Manifests\Dell.json
-```
-
-Exit code `0` means you are done.
-
----
-
-## Troubleshooting
-
-The most common issues are covered in [`docs/TROUBLESHOOTING.md`](TROUBLESHOOTING.md). Quick pointers:
-
-| Symptom | Likely Cause | Doc |
+| AppName | Source | Why |
 |---|---|---|
-| Recipe not found | Wrong vendor name or missing file | [Build Tool Errors](TROUBLESHOOTING.md#build-tool-errors) |
-| Manifest and recipe out of sync | Manifest was updated, recipe was not | [Build Tool Errors](TROUBLESHOOTING.md#build-tool-errors) |
-| `winget download` fails | ID is wrong, or the package is MSStore-only | [`winget download` Issues](TROUBLESHOOTING.md#winget-download-issues) |
-| HTTP 403 from a direct URL | Vendor is blocking the request | [Direct URL Download Issues](TROUBLESHOOTING.md#direct-url-download-issues) |
-| Hash mismatch | Vendor shipped a new version | [Hash Verification Failures](TROUBLESHOOTING.md#hash-verification-failures) |
-| 7-Zip fails to pack | Output path is locked or on a FAT32 volume | [7-Zip Packing Failures](TROUBLESHOOTING.md#7-zip-packing-failures) |
-| Validation reports missing apps | Manual apps were not supplied | [Verification and Validation Failures](TROUBLESHOOTING.md#verification-and-validation-failures) |
+| `Microsoft.WindowsAppRuntime.1.8` | `winget` | Available as an MSI in winget |
+| `Microsoft .NET Windows Desktop Runtime 8` | `winget` | Available as an MSI in winget |
+| `Microsoft .NET Windows Desktop Runtime 10` | `winget` | Available as an MSI in winget |
+| `Dell SupportAssist` | `direct-url` | Winget only has the Store version; Dell publishes a standalone installer |
+| `DellInc.DellSupportAssistforPCs` | `manual` | UWP MSIX, MSStore-only, no unattended download path |
+| `Alienware Command Center (v6)` | `direct-url` | Winget only has the Store version |
+| `Alienware Command Center (v5)` | `direct-url` | Older version, kept for legacy hardware |
+| `DellInc.MyAlienware` | `winget` (`msstore`) | Store-only, user installs after first logon |
+| `Fusion Service` | `direct-url` | Dell-published installer |
+| `Dell Optimizer` | `winget` | Available as an MSI in winget |
+| `Dell Precision Optimizer` | `direct-url` | Precision-specific, not in winget |
+| `Dell Power Manager Service` | `direct-url` | Dell-published installer |
+| `Dell Command | Update for Windows Universal` | `winget` | Available as an MSI in winget |
+| `DellInc.DellCommandUpdate` | `direct-url` | UWP companion, Dell publishes an appxbundle |
+
+Note that several apps are `direct-url` even though a Store version exists in winget. The standalone Dell installers are used because they can be silently installed without Store authentication. Store-only paths are used only when the app is genuinely a UWP that cannot be distributed otherwise.
+
+### Assets in the Dell recipe
+
+Every file under `vendors/Dell/Assets/` is declared in the `assets` array. The `TargetPath` for most files is `"."` (archive root). The two nested `Customizations/*.7z` files go under `Customizations/`.
 
 ---
 
-*See [docs/ADDING-A-VENDOR.md](ADDING-A-VENDOR.md) for how to author a recipe, [docs/RECIPE-SCHEMA.md](RECIPE-SCHEMA.md) for the field reference, [docs/WINGET-DOWNLOAD.md](WINGET-DOWNLOAD.md) for `winget download` specifics, and [docs/TROUBLESHOOTING.md](TROUBLESHOOTING.md) for a symptom-first guide.*
+## Common Pitfalls
+
+### Committing vendor installers
+
+**Never** commit a vendor installer to `Assets/`. The repository's `.gitignore` blocks most binary extensions, but you can force-add them. Do not. Vendor installers belong in the cache, not in Git.
+
+If you believe a specific installer must be committed (for example, because the vendor does not publish a stable URL), open an issue first. The answer is almost always to use `manual` instead.
+
+### Using `manual` too readily
+
+`manual` shifts work onto every user of the recipe. Before you use it, exhaust the other three options. A `manual` entry is a last resort, not a convenience.
+
+### Forgetting the framework manifest
+
+The recipe is validated against the framework manifest at build time. If you add apps to the recipe that are not in the manifest, or vice versa, the build fails. Always update the manifest in `MDT-Zero-Touch-Deployment` before or alongside the recipe.
+
+### Not testing on real hardware
+
+A recipe that validates cleanly against the manifest can still fail on real hardware. Model strings may not match, installers may require interactive dialogs, or the framework may not recognize the vendor. Test on real hardware before opening a PR.
+
+### Committing personal values
+
+Never commit a recipe or asset that contains:
+
+- A product key
+- A credential
+- A machine-specific name
+- A personal organization name
+
+These are the most common reasons a PR is rejected.
+
+### Skipping the `Sha256` field
+
+A `direct-url` entry without a `Sha256` produces a warning and defeats the purpose of hash verification. Always include it. If you do not know the hash yet, run the build once, copy the observed hash from the log, and add it in a follow-up commit.
+
+### Using the wrong asset encoding
+
+`.reg` files must be UTF-16 LE with BOM. Text files must be UTF-8 without BOM. Getting this wrong causes silent failures at deployment time.
+
+### Adding a vendor that is not in the supported list
+
+The supported vendor list is defined in the deployment repository's `ExtractOEMAppsx64.ps1` and in the framework's vendor detection logic. Adding a vendor outside that list requires coordinated changes in the deployment repository. Open a Discussion first.
+
+---
+
+*See [docs/RECIPE-SCHEMA.md](RECIPE-SCHEMA.md) for the field reference, [docs/BUILDING-PACKS.md](BUILDING-PACKS.md) for the build workflow, and [docs/WINGET-DOWNLOAD.md](WINGET-DOWNLOAD.md) for `winget download` behaviour.*
