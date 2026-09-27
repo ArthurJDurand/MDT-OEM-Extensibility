@@ -1,0 +1,243 @@
+name: 🐛 Bug Report
+description: Report a bug in a build tool, vendor recipe, or download source
+title: "[Bug]: "
+labels:
+  - bug
+  - needs-triage
+assignees:
+  - ArthurJDurand
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. Before submitting, please:
+
+        1. **Search [existing issues](https://github.com/ArthurJDurand/MDT-OEM-Extensibility/issues)** to avoid duplicates.
+        2. **Check [docs/TROUBLESHOOTING.md](https://github.com/ArthurJDurand/MDT-OEM-Extensibility/blob/main/docs/TROUBLESHOOTING.md)** for common errors and fixes.
+        3. **Review the [Known Limitations](https://github.com/ArthurJDurand/MDT-OEM-Extensibility#known-limitations)** section in the README.
+
+        The more detail you provide, the faster this can be resolved.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-flight checks
+      description: Please confirm you have completed these steps before filing.
+      options:
+        - label: I have searched existing issues and this bug has not been reported.
+          required: true
+        - label: I have read docs/TROUBLESHOOTING.md and my issue is not covered there.
+          required: true
+        - label: I have read the Known Limitations section in the README.
+          required: true
+        - label: I am running the latest version of the repository (main branch).
+          required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of what the bug is.
+      placeholder: |
+        Example: The Dell recipe for "Dell Command | Update for Windows Universal"
+        fails with a 404 when the build tool attempts to download it. The URL in
+        the recipe no longer resolves.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What did you expect to happen?
+      placeholder: The build tool downloads the installer and packs it into Dell.7z.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What actually happened? Include exact error messages verbatim.
+      placeholder: |
+        Build-OEMPack.ps1 exits with error:
+        "Resolve-OEMUrl.ps1: HTTP 404 for https://dl.dell.com/FOLDER.../Dell-Command-Update-Windows-Universal-Application.exe"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Exact steps to reproduce the bug. Be specific.
+      placeholder: |
+        1. Cloned the repository at commit abc1234
+        2. Ran: .\tools\Build-OEMPack.ps1 -Vendor Dell -OutputPath C:\Test
+        3. Tool downloads 12 of 14 apps successfully
+        4. Fails on "Dell Command | Update for Windows Universal" with HTTP 404
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      description: Which part of the repository is involved? Select the closest match.
+      options:
+        - Not sure / multiple components
+        - tools/Build-OEMPack.ps1
+        - tools/New-OEMAppPack.ps1
+        - tools/Test-OEMAppPack.ps1
+        - tools/Resolve-WingetPackage.ps1
+        - tools/Resolve-OEMUrl.ps1
+        - tools/Build-DellWinPEMap.ps1
+        - tools/Build-HPWinPEMap.ps1
+        - tools/Build-LenovoWinPEMap.ps1
+        - A vendor Recipe.json (specify vendor in Description)
+        - A vendor asset (specify in Description)
+        - schema/vendor-recipe.schema.json
+        - schema/winpe-map.schema.json
+        - Documentation
+        - Other (specify in Description)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: vendor
+    attributes:
+      label: Affected vendor (if applicable)
+      description: Which vendor is involved? Select the closest match.
+      options:
+        - Not applicable / multiple vendors
+        - Dell
+        - HP
+        - Lenovo
+        - ASUS
+        - Acer
+        - MSI
+        - Gigabyte
+        - Dynabook
+        - Huawei
+        - Microsoft
+        - Proline
+        - Other (specify in Description)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: source_type
+    attributes:
+      label: Source type (if recipe-related)
+      description: What kind of source does the failing app use?
+      options:
+        - Not applicable
+        - winget
+        - direct-url
+        - repo-asset
+        - manual
+        - Multiple / mixed
+        - Not sure
+    validations:
+      required: false
+
+  - type: input
+    id: app_name
+    attributes:
+      label: App name (if recipe-related)
+      description: The `AppName` field from the recipe entry that fails.
+      placeholder: "Dell Command | Update for Windows Universal"
+    validations:
+      required: false
+
+  - type: input
+    id: powershell_version
+    attributes:
+      label: PowerShell version
+      description: Output of `$PSVersionTable.PSVersion` on the build host.
+      placeholder: "5.1.22621.4391"
+    validations:
+      required: true
+
+  - type: input
+    id: windows_build
+    attributes:
+      label: Windows build
+      description: Output of `winver` on the build host, or the full build number.
+      placeholder: "Windows 11 24H2 (build 26100.1742)"
+    validations:
+      required: true
+
+  - type: input
+    id: winget_version
+    attributes:
+      label: winget version
+      description: Output of `winget --version` on the build host.
+      placeholder: "v1.9.25200"
+    validations:
+      required: true
+
+  - type: input
+    id: sevenzip_version
+    attributes:
+      label: 7-Zip version
+      description: Version of 7-Zip installed at `C:\Program Files\7-Zip\7z.exe`.
+      placeholder: "23.01"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: network_region
+    attributes:
+      label: Network region (approximate)
+      description: Vendor CDNs sometimes behave differently by region. This helps isolate regional issues.
+      options:
+        - North America
+        - South America
+        - Europe
+        - Africa
+        - Middle East
+        - Asia
+        - Oceania
+        - VPN or corporate proxy
+        - Prefer not to say
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log excerpts
+      description: |
+        Paste only the lines surrounding the error. Do **not** paste entire logs inline.
+
+        Relevant sources:
+        - **Build tool output:** console output of `Build-OEMPack.ps1`
+        - **winget output:** `winget download` output, if applicable
+        - **HTTP response:** status code, headers, and body if the failure is a download
+        - **7-Zip output:** console output of `7z.exe` if packing failed
+        - **Map builder output:** console output of the map builder script
+
+        If your log is long, attach it as a file or upload to a Gist and link it here.
+      render: text
+      placeholder: |
+        [2026-01-15 14:32:18] [ERROR] Resolve-OEMUrl.ps1: HTTP 404 for https://dl.dell.com/...
+        [2026-01-15 14:32:18] [ERROR] At C:\...\Build-OEMPack.ps1:142
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: If applicable, add screenshots of error dialogs or terminal output. Drag and drop images directly into this box.
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Anything else that might be relevant — recent changes to your environment, custom modifications to a recipe, unusual network configuration, and so on.
+    validations:
+      required: false
